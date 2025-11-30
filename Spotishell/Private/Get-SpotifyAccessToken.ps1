@@ -12,6 +12,23 @@
     .PARAMETER ApplicationName
         Specifies the Spotify Application Name (otherwise default is used)
 #>
+
+# NEW for PKCE 
+function generateRandomString {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory=$true)]
+        [int]$Length,
+
+        [Parameter()]
+        [string]$CharacterSet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    )
+
+    $randomString = -join ($CharacterSet.ToCharArray() | Get-Random -Count $Length)
+    return $randomString
+}
+	
+
 function Get-SpotifyAccessToken {
 
     [CmdletBinding()]
@@ -88,7 +105,7 @@ function Get-SpotifyAccessToken {
     # ------------------------------ Authorization Code retrieval ------------------------------
     # STEP 1 : Prepare
     $EncodedRedirectUri = [System.Web.HTTPUtility]::UrlEncode($Application.RedirectUri)
-    $EncodedScopes = @( # requesting all existing scopes
+    $EncodedScopes = @( # requesting all existing scopes - https://developer.spotify.com/documentation/web-api/concepts/scopes
         'ugc-image-upload',
         'playlist-modify-public',
         'playlist-read-private',
@@ -117,7 +134,24 @@ function Get-SpotifyAccessToken {
     $Uri += "&redirect_uri=$EncodedRedirectUri"
     $Uri += "&state=$State"
     $Uri += "&scope=$EncodedScopes"
-    
+	
+	# PKCE - See https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow
+	# TEST:  See: https://example-app.com/pkce
+	#   With $codeVerifier = 'eMA6mkoHibdWuDazYEg9yj5LOf1ZpTwF0VBhQSP8UR3G7tsNcnlJCI2K4vqXxr'
+	#   Then the code_challenge = 'l-y7vpKTC85N1Lk2gUBBGUMM8ybetveaowJCjs3Bjok'
+	#
+	$codeVerifier  = generateRandomString(64)
+	$Application.Add('Code_Verifier', $codeVerifier)  # Save the Code_Verifier
+	$hasher = [System.Security.Cryptography.HashAlgorithm]::Create('sha256')  # new-object System.Security.Cryptography.SHA256Managed 
+	$hashBytes = $hasher.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($codeVerifier))
+	$hexString = (($hashBytes | ForEach-Object { $_.ToString('X2') }) -join '').ToLower()	# Convert to Hex (for display only)
+    $b64Hash = [System.Convert]::ToBase64String($hashBytes)
+	$codeChallenge = $b64Hash.Substring(0, 43).Replace('=','').Replace('+','-').Replace('/','_')
+	# write-host -ForegroundColor Yellow " Code_Verifier: $codeVerifier`n hexString: $hexString`n Code_Challenge: $codeChallenge`n Redirect_uri: $($Application.RedirectUri)"   # DEBUG
+
+	# PKCE - Update API authorization by adding these two parameters in the URI
+	$uri += "&code_challenge_method=S256"
+	$uri += "&code_challenge=$codeChallenge"
 
     # if running in a Docker container
     if ($env:POWERSHELL_DISTRIBUTION_CHANNEL.StartsWith('PSDocker')){
@@ -243,6 +277,7 @@ function Get-SpotifyAccessToken {
         redirect_uri  = $Application.RedirectUri
         client_id     = $Application.ClientId # alternative way to send the client id and secret
         client_secret = $Application.ClientSecret # alternative way to send the client id and secret
+		code_verifier = $Application.Code_Verifier  # PKCE
     }
 
     # STEP 2 : Make request to the Spotify Accounts service
